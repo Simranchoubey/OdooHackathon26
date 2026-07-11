@@ -210,7 +210,7 @@ CREATE TABLE `departments` (
   KEY `head_id` (`head_id`),
   CONSTRAINT `departments_ibfk_1` FOREIGN KEY (`parent_id`) REFERENCES `departments` (`id`) ON DELETE SET NULL,
   CONSTRAINT `departments_ibfk_2` FOREIGN KEY (`head_id`) REFERENCES `users` (`id`) ON DELETE SET NULL
-) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=4 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -219,7 +219,7 @@ CREATE TABLE `departments` (
 
 LOCK TABLES `departments` WRITE;
 /*!40000 ALTER TABLE `departments` DISABLE KEYS */;
-INSERT INTO `departments` VALUES (1,'Engineering',NULL,'Active','2026-07-12 04:13:13',2),(2,'Facilities',NULL,'Active','2026-07-12 04:13:13',NULL);
+INSERT INTO `departments` VALUES (1,'Engineering',NULL,'Active','2026-07-12 04:13:13',2),(2,'Facilities',NULL,'Active','2026-07-12 04:13:13',NULL),(3,'Sports',2,'Active','2026-07-11 06:05:36',3);
 /*!40000 ALTER TABLE `departments` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -335,4 +335,4 @@ UNLOCK TABLES;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-07-12  5:18:01
+-- Dump completed on 2026-07-12  6:06:46

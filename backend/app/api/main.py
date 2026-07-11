@@ -2,7 +2,8 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func
 import datetime
-from typing import List
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
 
 from backend.app import models
 from backend.app.database import SessionLocal
@@ -94,15 +95,276 @@ def get_dashboard_overview(db: Session = Depends(get_db)):
 
 # SCREEN ROUTER PLACEHOLDERS
 
-@app.get("/organization-setup", tags=["Placeholder Router"])
-def screen_3_organization_setup():
-    """
-    [SCREEN 3 ROUTER]: Admin Only Master Data Configuration Tree.
-    - Tab A: Manage department hierarchies (Parent-child tracking).
-    - Tab B: Define categories and register optional dynamic schemas via JSON custom fields.
-    - Tab C: Central Employee Directory to promote Employees to 'Asset Manager' or 'Department Head'.
-    """
-    return {"status": "Router Blueprint Ready", "scope": ["Departments", "Categories", "Employees"]}
+
+# Sesssion 3
+
+# Pydantic Schemas
+class DepartmentRequest(BaseModel):
+    name: str = Field(..., example="Sports")
+    parent_department_name: Optional[str] = Field(None, example="Facilities")
+    head_employee_name: Optional[str] = Field(None, example="Arjun Varma")
+    status: Optional[str] = "Active"
+
+class EmployeeResponse(BaseModel):
+    id: int
+    name: str
+    email: str
+    role: str
+    department_name: Optional[str]
+    status: str
+
+    class Config:
+        from_attributes = True
+
+class DepartmentResponse(BaseModel):
+    id: int
+    name: str
+    parent_department_name: Optional[str]
+    head_employee_name: Optional[str]
+    status: str
+
+    class Config:
+        from_attributes = True
+
+
+# --- TAB A: Department Management ---
+@app.get("/admin/departments", response_model=List[DepartmentResponse])
+def list_departments(db: Session = Depends(get_db)):
+    departments = db.query(models.Department).all()
+    
+    response = []
+    for dept in departments:
+        # Resolve parent department name safely
+        parent_name = None
+        if dept.parent_id:
+            parent_dept = db.query(models.Department).filter(models.Department.id == dept.parent_id).first()
+            parent_name = parent_dept.name if parent_dept else None
+            
+        # Resolve head employee name safely
+        head_name = None
+        if dept.head_id:
+            head_user = db.query(models.User).filter(models.User.id == dept.head_id).first()
+            head_name = head_user.name if head_user else None
+            
+        response.append(DepartmentResponse(
+            id=dept.id,
+            name=dept.name,
+            parent_department_name=parent_name,
+            head_employee_name=head_name,
+            status=dept.status
+        ))
+    return response
+
+@app.post("/admin/departments", status_code=201, response_model=DepartmentResponse)
+def create_department(dept: DepartmentRequest, db: Session = Depends(get_db)):
+    # 1. Check if department name already exists to prevent duplicate failures
+    existing_dept = db.query(models.Department).filter(models.Department.name == dept.name).first()
+    if existing_dept:
+        raise HTTPException(status_code=400, detail=f"Department '{dept.name}' already exists.")
+
+    # 2. Map Parent Department Name to internal ID
+    parent_id = None
+    if dept.parent_department_name:
+        parent = db.query(models.Department).filter(models.Department.name == dept.parent_department_name).first()
+        if not parent:
+            raise HTTPException(status_code=404, detail=f"Parent department '{dept.parent_department_name}' not found.")
+        parent_id = parent.id
+
+    # 3. Map Head Employee Name to internal ID
+    head_id = None
+    if dept.head_employee_name:
+        head = db.query(models.User).filter(models.User.name == dept.head_employee_name).first()
+        if not head:
+            raise HTTPException(status_code=404, detail=f"Employee '{dept.head_employee_name}' not found to assign as Head.")
+        head_id = head.id
+
+    db_dept = models.Department(
+        name=dept.name,
+        parent_id=parent_id,
+        head_id=head_id,
+        status=dept.status
+    )
+    db.add(db_dept)
+    db.commit()
+    db.refresh(db_dept)
+    
+    return DepartmentResponse(
+        id=db_dept.id,
+        name=db_dept.name,
+        parent_department_name=dept.parent_department_name,
+        head_employee_name=dept.head_employee_name,
+        status=db_dept.status
+    )
+
+@app.patch("/admin/departments/{dept_id}", response_model=DepartmentResponse)
+def update_department(dept_id: int, dept_data: DepartmentRequest, db: Session = Depends(get_db)):
+    dept = db.query(models.Department).filter(models.Department.id == dept_id).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Target department not found")
+    
+    # Internal Resolution Strategy for modifications
+    parent_id = None
+    if dept_data.parent_department_name:
+        parent = db.query(models.Department).filter(models.Department.name == dept_data.parent_department_name).first()
+        if not parent:
+            raise HTTPException(status_code=404, detail=f"Parent department '{dept_data.parent_department_name}' not found.")
+        parent_id = parent.id
+
+    head_id = None
+    if dept_data.head_employee_name:
+        head = db.query(models.User).filter(models.User.name == dept_data.head_employee_name).first()
+        if not head:
+            raise HTTPException(status_code=404, detail=f"Employee '{dept_data.head_employee_name}' not found.")
+        head_id = head.id
+
+    dept.name = dept_data.name
+    dept.parent_id = parent_id
+    dept.head_id = head_id
+    dept.status = dept_data.status
+    
+    db.commit()
+    
+    return DepartmentResponse(
+        id=dept.id,
+        name=dept.name,
+        parent_department_name=dept_data.parent_department_name,
+        head_employee_name=dept_data.head_employee_name,
+        status=dept.status
+    )
+
+# --- TAB C: Employee Directory ---
+@app.get("/admin/employees", response_model=List[EmployeeResponse])
+def list_employees(db: Session = Depends(get_db)):
+    users = db.query(models.User).all()
+    
+    response = []
+    for user in users:
+        dept_name = None
+        if user.department_id:
+            dept = db.query(models.Department).filter(models.Department.id == user.department_id).first()
+            dept_name = dept.name if dept else None
+            
+        response.append(EmployeeResponse(
+            id=user.id,
+            name=user.name,
+            email=user.email,
+            role=user.role,
+            department_name=dept_name,
+            status=user.status
+        ))
+    return response
+
+@app.patch("/admin/employees/{user_id}/manage")
+def manage_employee(user_id: int, role: str, department_name: Optional[str] = None, status: str = "Active", db: Session = Depends(get_db)):
+    if role not in ['Admin', 'Asset Manager', 'Department Head', 'Employee']:
+        raise HTTPException(status_code=400, detail="Invalid role assignment execution template.")
+        
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Employee not located in master directories.")
+        
+    user.role = role
+    user.status = status
+    
+    if department_name:
+        dept = db.query(models.Department).filter(models.Department.name == department_name).first()
+        if not dept:
+            raise HTTPException(status_code=404, detail=f"Department '{department_name}' does not exist.")
+        user.department_id = dept.id
+        
+    db.commit()
+    return {"message": f"Successfully updated profile for {user.name}"}
+
+"""
+# =============================================================================
+# SCREEN 4: ASSET REGISTRATION & DIRECTORY (FULLY OPERATIONAL)
+# =============================================================================
+
+@app.post("/assets", status_code=201)
+def register_asset(asset: AssetCreate, db: Session = Depends(get_db)):
+    # Sequential Asset Tag Generation Auto Engine (e.g., AF-0008)
+    last_asset = db.query(models.Asset).order_by(models.Asset.id.desc()).first()
+    next_id = (last_asset.id + 1) if last_asset else 1
+    generated_tag = f"AF-{next_id:04d}"
+
+    db_asset = models.Asset(
+        asset_tag=generated_tag,
+        name=asset.name,
+        category_id=asset.category_id,
+        serial_number=asset.serial_number,
+        acquisition_date=asset.acquisition_date,
+        acquisition_cost=asset.acquisition_cost,
+        condition_state=asset.condition_state,
+        lifecycle_status="Available",
+        location=asset.location,
+        is_shared_bookable=asset.is_shared_bookable,
+        dynamic_attributes=asset.dynamic_attributes or {}
+    )
+    db.add(db_asset)
+    db.commit()
+    db.refresh(db_asset)
+    return db_asset
+
+@app.get("/assets")
+def query_asset_directory(
+    search: Optional[str] = None,
+    category_id: Optional[int] = None,
+    status: Optional[str] = None,
+    location: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.Asset)
+    
+    if search:
+        query = query.filter(
+            or_(
+                models.Asset.asset_tag.like(f"%{search}%"),
+                models.Asset.name.like(f"%{search}%"),
+                models.Asset.serial_number.like(f"%{search}%")
+            )
+        )
+    if category_id:
+        query = query.filter(models.Asset.category_id == category_id)
+    if status:
+        query = query.filter(models.Asset.lifecycle_status == status)
+    if location:
+        query = query.filter(models.Asset.location.like(f"%{location}%"))
+        
+    return query.all()
+
+@app.get("/assets/{asset_id}/history")
+def get_asset_history(asset_id: int, db: Session = Depends(get_db)):
+    asset = db.query(models.Asset).filter(models.Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset profile not found")
+
+    allocations = db.query(models.AllocationTransfer).filter(models.AllocationTransfer.asset_id == asset_id).all()
+    maintenance = db.query(models.MaintenanceRequest).filter(models.MaintenanceRequest.asset_id == asset_id).all()
+
+    return {
+        "asset_tag": asset.asset_tag,
+        "name": asset.name,
+        "allocation_history": [
+            {
+                "id": a.id,
+                "type": a.type,
+                "status": a.status,
+                "expected_return": a.expected_return_date,
+                "created_at": a.created_at
+            } for a in allocations
+        ],
+        "maintenance_history": [
+            {
+                "id": m.id,
+                "description": m.description,
+                "priority": m.priority,
+                "status": m.status,
+                "created_at": m.created_at
+            } for m in maintenance
+        ]
+    }
+
+"""
 
 
 @app.get("/asset-directory", tags=["Placeholder Router"])
