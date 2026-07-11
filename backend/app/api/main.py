@@ -4,29 +4,25 @@ from sqlalchemy import and_, or_, func
 import datetime
 from typing import List
 
-# Hook directly into your existing models file
 from backend.app import models
+from backend.app.database import SessionLocal
 
 app = FastAPI(title="AssetFlow Enterprise Engine")
 
 # --- Database Session Dependency ---
 def get_db():
-    db = None 
+    db = SessionLocal()
     try:
         yield db
     finally:
-        if db:
-            db.close()
+        db.close()
 
-# =============================================================================
-# SCREEN 2: DASHBOARD / HOME SCREEN (FULLY OPERATIONAL)
-# =============================================================================
+
+# SCREEN 2: DASHBOARD / HOME SCREEN
+
 @app.get("/dashboard/overview")
 def get_dashboard_overview(db: Session = Depends(get_db)):
-    """
-    Provides a real-time operational snapshot including KPI metrics, 
-    overdue return condition tracking, and a consolidated timeline feed.
-    """
+
     current_time = datetime.datetime.utcnow()
     current_date = datetime.date.today()
 
@@ -96,9 +92,7 @@ def get_dashboard_overview(db: Session = Depends(get_db)):
     }
 
 
-# =============================================================================
-# SCREEN ROUTER PLACEHOLDERS (DOCUMENTING COMING ENGINE MODULES)
-# =============================================================================
+# SCREEN ROUTER PLACEHOLDERS
 
 @app.get("/organization-setup", tags=["Placeholder Router"])
 def screen_3_organization_setup():

@@ -1,9 +1,8 @@
-from sqlalchemy.orm import relationship, declarative_base
+from sqlalchemy.orm import relationship, backref
 import datetime
 from sqlalchemy import Column, Integer, String, Enum, ForeignKey, DateTime, Numeric, Boolean, Date, JSON, Text
 
-
-Base = declarative_base()
+from backend.app.database import Base
 
 class Department(Base):
     __tablename__ = 'departments'
@@ -14,9 +13,11 @@ class Department(Base):
     head_id = Column(Integer, ForeignKey('users.id'), nullable=True)
     status = Column(Enum('Active', 'Inactive'), default='Active')
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    
-    # Relationships
-    sub_departments = relationship("Department", backref=relationship("Department", remote_side=[id]))
+
+    sub_departments = relationship(
+        "Department",
+        backref=backref("parent", remote_side=[id])
+    )
     employees = relationship("User", foreign_keys="User.department_id", back_populates="department")
 
 class User(Base):

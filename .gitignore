@@ -6,7 +6,5 @@
 .env
 Test.ipynb
 
-
-*.txt
 *.env
 *.pyc
