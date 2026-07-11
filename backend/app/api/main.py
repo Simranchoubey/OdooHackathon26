@@ -735,6 +735,131 @@ def reserve_resource_timeslot(req: ReserveSlotRequest, db: Session = Depends(get
         "booking_id": new_booking.id
     }
 
+
+# =============================================================================
+# SCREEN 7: MAINTENANCE KANBAN MANAGEMENT ENGINE
+# =============================================================================
+
+# --- Pydantic Schemas ---
+
+class MaintenanceCardResponse(BaseModel):
+    request_id: int
+    asset_tag: str
+    asset_name: str
+    description: str
+    priority: str
+    status: str
+    assigned_technician_name: Optional[str] = None
+    resolution_notes: Optional[str] = None
+    date_label: str
+
+class KanbanBoardResponse(BaseModel):
+    pending: List[MaintenanceCardResponse]
+    approved: List[MaintenanceCardResponse]
+    technician_assigned: List[MaintenanceCardResponse]
+    in_progress: List[MaintenanceCardResponse]
+    resolved: List[MaintenanceCardResponse]
+
+class MaintenanceTransitionRequest(BaseModel):
+    target_status: str  # 'Pending', 'Approved', 'In_Progress', 'Resolved'
+    technician_name: Optional[str] = None
+    resolution_notes: Optional[str] = None
+
+
+# --- API Endpoints ---
+
+@app.get("/maintenance/kanban", response_model=KanbanBoardResponse, tags=["Screen 7"])
+def get_maintenance_kanban_board(db: Session = Depends(get_db)):
+    """
+    Fetches and categorizes all maintenance requests into specific Kanban columns.
+    """
+    requests = db.query(models.MaintenanceRequest).order_by(models.MaintenanceRequest.created_at.desc()).all()
+
+    board = {
+        "pending": [],
+        "approved": [],
+        "technician_assigned": [],
+        "in_progress": [],
+        "resolved": []
+    }
+
+    for r in requests:
+        tech_name = db.query(models.User).filter(models.User.id == r.assigned_technician_id).first().name if r.assigned_technician_id else None
+        date_lbl = r.created_at.strftime("%d %b")
+
+        card = MaintenanceCardResponse(
+            request_id=r.id,
+            asset_tag=r.asset.asset_tag,
+            asset_name=r.asset.name,
+            description=r.description,
+            priority=r.priority,
+            status=r.status,
+            assigned_technician_name=tech_name,
+            resolution_notes=r.resolution_notes,
+            date_label=f"resolved {date_lbl}" if r.status == "Resolved" else date_lbl
+        )
+
+        # Distribute into matching columns based on status and technician assignment
+        if r.status == "Pending":
+            board["pending"].append(card)
+        elif r.status == "Approved" and not r.assigned_technician_id:
+            board["approved"].append(card)
+        elif r.status == "Approved" and r.assigned_technician_id:
+            board["technician_assigned"].append(card)
+        elif r.status == "In_Progress":
+            board["in_progress"].append(card)
+        elif r.status == "Resolved":
+            board["resolved"].append(card)
+
+    return board
+
+
+@app.patch("/maintenance/{request_id}/transition", status_code=200, tags=["Screen 7"])
+def transition_maintenance_kanban_card(request_id: int, req: MaintenanceTransitionRequest, db: Session = Depends(get_db)):
+    """
+    Handles moving cards between columns and automatically mutates the asset lifecycle state.
+    """
+    allowed_statuses = ['Pending', 'Approved', 'In_Progress', 'Resolved', 'Rejected']
+    if req.target_status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail="Invalid Kanban status target column.")
+
+    maint_req = db.query(models.MaintenanceRequest).filter(models.MaintenanceRequest.id == request_id).first()
+    if not maint_req:
+        raise HTTPException(status_code=404, detail="Maintenance ticket not found.")
+
+    asset = maint_req.asset
+
+    # 1. Resolve technician assignment if name is supplied
+    if req.technician_name:
+        tech_user = db.query(models.User).filter(models.User.name == req.technician_name).first()
+        if not tech_user:
+            raise HTTPException(status_code=404, detail=f"Technician '{req.technician_name}' not found.")
+        maint_req.assigned_technician_id = tech_user.id
+
+    # 2. Mutate Statuses & Apply Lifecycle Locks
+    maint_req.status = req.target_status
+    
+    if req.target_status in ["Approved", "In_Progress"]:
+        # Lock down the asset immediately
+        asset.lifecycle_status = "Under Maintenance"
+        msg = f"Ticket status set to {req.target_status}. Asset {asset.asset_tag} locked under maintenance state."
+        
+    elif req.target_status == "Resolved":
+        # Release the asset back to the pool
+        asset.lifecycle_status = "Available"
+        if req.resolution_notes:
+            maint_req.resolution_notes = req.resolution_notes
+        msg = f"Ticket successfully resolved. Asset {asset.asset_tag} is now Available."
+        
+    else:
+        # If explicitly set back to Pending, reset asset state if it was locked
+        asset.lifecycle_status = "Available"
+        msg = f"Ticket returned to Pending list."
+
+    db.commit()
+    return {"status": "Success", "message": msg, "current_asset_lifecycle": asset.lifecycle_status}
+
+
 @app.post("/allocations/allocate_", tags=["Placeholder Router"])
 def screen_5_allocation_engine():
     """
