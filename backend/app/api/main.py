@@ -573,6 +573,18 @@ def submit_allocation_or_transfer(req: AllocationSubmitRequest, db: Session = De
         checkin_notes=req.reason_notes
     )
     db.add(new_tx)
+    if transaction_type == "Transfer":
+        log_entry = models.SystemLog(
+            message=f"Transfer request initiated: {asset.name} ({asset.asset_tag}) to {target_user.name}",
+            category="Approval"
+        )
+    else:
+        log_entry = models.SystemLog(
+            message=f"Laptop {asset.asset_tag} assigned to {target_user.name}",
+            category="General"
+        )
+    db.add(log_entry)
+
     db.commit()
 
     # 4. Compile Consolidated UI Feed Timeline History Array (Sorted Newest First)
@@ -726,6 +738,13 @@ def reserve_resource_timeslot(req: ReserveSlotRequest, db: Session = Depends(get
         status="Upcoming"
     )
     db.add(new_booking)
+
+    log_entry = models.SystemLog(
+        message=f"Booking confirmed : {asset.name} : {req.start_hour}:00 to {req.end_hour}:00",
+        category="Booking"
+    )
+    db.add(log_entry)
+
     db.commit()
     db.refresh(new_booking)
 
@@ -856,56 +875,318 @@ def transition_maintenance_kanban_card(request_id: int, req: MaintenanceTransiti
         asset.lifecycle_status = "Available"
         msg = f"Ticket returned to Pending list."
 
+    if req.target_status in ["Approved", "In_Progress"]:
+        log_entry = models.SystemLog(
+            message=f"Maintenance request {asset.asset_tag} approved",
+            category="Approval"
+        )
+        db.add(log_entry)
+    elif req.target_status == "Resolved":
+        log_entry = models.SystemLog(
+            message=f"Maintenance resolved : {asset.name} is back online",
+            category="General"
+        )
+        db.add(log_entry)
+
     db.commit()
     return {"status": "Success", "message": msg, "current_asset_lifecycle": asset.lifecycle_status}
 
 
-@app.post("/allocations/allocate_", tags=["Placeholder Router"])
-def screen_5_allocation_engine():
-    """
-    [SCREEN 5 ROUTER]: Allocation & Handoff Core.
-    - Validates asset operational states to avoid double-allocation issues.
-    - Triggers contextual data updates when routing cross-department Transfer Requests.
-    """
-    return {"status": "Router Blueprint Ready", "scope": ["Conflict Handling", "Transfer Requests", "Check-in Notes"]}
+# =============================================================================
+# SCREEN 8: STRUCTURED ASSET AUDIT SYSTEM
+# =============================================================================
+
+# --- Pydantic Schemas ---
+
+class AuditItemResponse(BaseModel):
+    item_id: int
+    asset_tag: str
+    asset_name: str
+    expected_location: str
+    verification_state: str
+    notes: Optional[str]
+
+class AuditCycleDetailsResponse(BaseModel):
+    cycle_id: int
+    title: str
+    status: str
+    auditors_label: str
+    checklist: List[AuditItemResponse]
+    discrepancy_count: int
+    discrepancy_message: str
+
+class VerifyItemRequest(BaseModel):
+    verification_state: str  # 'Pending', 'Verified', 'Missing', 'Damaged'
+    notes: Optional[str] = None
 
 
-@app.post("/bookings/reserve_", tags=["Placeholder Router"])
-def screen_6_resource_booking():
+# --- API Endpoints ---
+
+@app.get("/audits/cycle/{cycle_id}", response_model=AuditCycleDetailsResponse, tags=["Screen 8"])
+def get_audit_cycle_details(cycle_id: int, db: Session = Depends(get_db)):
     """
-    [SCREEN 6 ROUTER]: Time-Slot Conflict Resolver.
-    - Enforces precision boundary checks on shared assets (Rooms, Vehicles).
-    - Uses overlapping validation queries: (StartA < EndB) AND (EndA > StartB).
+    Fetches active cycle contexts, compiles tracking states, 
+    and auto-calculates flagged discrepancy metrics for the UI layout display banners.
     """
-    return {"status": "Router Blueprint Ready", "scope": ["Calendar Feeds", "Overlap Validation", "Cancellations"]}
+    cycle = db.query(models.AuditCycle).filter(models.AuditCycle.id == cycle_id).first()
+    if not cycle:
+        raise HTTPException(status_code=404, detail="Target audit cycle context not found.")
+
+    items = db.query(models.AuditItem).filter(models.AuditItem.audit_cycle_id == cycle.id).all()
+
+    # Collect distinct auditor names to match the header summary text format
+    auditor_ids = {i.auditor_id for i in items}
+    auditor_names = db.query(models.User.name).filter(models.User.id.in_(auditor_ids)).all() if auditor_ids else []
+    auditors_str = ", ".join([name[0] for name in auditor_names]) if auditor_names else "Unassigned"
+
+    checklist_feed = []
+    discrepancy_count = 0
+
+    for item in items:
+        # Increment dynamic layout error counter if item is flagged as anomalous
+        if item.verification_state in ["Missing", "Damaged"]:
+            discrepancy_count += 1
+
+        checklist_feed.append(AuditItemResponse(
+            item_id=item.id,
+            asset_tag=item.asset.asset_tag,
+            asset_name=item.asset.name,
+            expected_location=item.asset.location,
+            verification_state=item.verification_state,
+            notes=item.notes
+        ))
+
+    return AuditCycleDetailsResponse(
+        cycle_id=cycle.id,
+        title=cycle.title,
+        status=cycle.status,
+        auditors_label=f"Auditors: {auditors_str}",
+        checklist=checklist_feed,
+        discrepancy_count=discrepancy_count,
+        discrepancy_message=f"{discrepancy_count} assets flagged - discrepancy report generated automatically"
+    )
 
 
-@app.patch("/maintenance/{request_id}/transition_", tags=["Placeholder Router"])
-def screen_7_maintenance_kanban():
+@app.patch("/audits/items/{item_id}/verify", status_code=200, tags=["Screen 8"])
+def update_audit_item_verification(item_id: int, req: VerifyItemRequest, db: Session = Depends(get_db)):
     """
-    [SCREEN 7 ROUTER]: Multi-tier Maintenance Status Router.
-    - Handles status workflows: Pending -> Approved -> In Progress -> Resolved.
-    - Automatically flips asset states into 'Under Maintenance' and restores them to 'Available' upon fix.
+    Updates the verification status of a specific asset line item in the checklist.
     """
-    return {"status": "Router Blueprint Ready", "scope": ["Raise Issue", "Approval Workflows", "Technician Assignment"]}
+    if req.verification_state not in ['Pending', 'Verified', 'Missing', 'Damaged']:
+        raise HTTPException(status_code=400, detail="Invalid verification state parameter option choice.")
+
+    item = db.query(models.AuditItem).filter(models.AuditItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Checklist row item reference index not found.")
+
+    # Prevent modifications if the overarching cycle is already locked out
+    if item.audit_cycle_id and db.query(models.AuditCycle).filter(models.AuditCycle.id == item.audit_cycle_id).first().status == "Closed":
+        raise HTTPException(status_code=400, detail="The parent audit cycle is closed and locked against modifications.")
+
+    item.verification_state = req.verification_state
+    if req.notes:
+        item.notes = req.notes
+
+    db.commit()
+    return {"status": "Updated", "current_state": item.verification_state}
 
 
-@app.get("/audits_", tags=["Placeholder Router"])
-def screen_8_structured_audits():
+@app.post("/audits/cycle/{cycle_id}/close", status_code=200, tags=["Screen 8"])
+def close_audit_cycle_execution(cycle_id: int, db: Session = Depends(get_db)):
     """
-    [SCREEN 8 ROUTER]: Internal Audit Verification Tracker.
-    - Launches dedicated cycle contexts bound to department locations.
-    - Allows marking checklists: Verified, Missing, or Damaged.
-    - Auto-generates discrepancy reports and automatically marks missing assets as 'Lost' on cycle close.
+    Closes the audit execution cycle and auto-mutates any unresolved 
+    'Missing' assets globally to 'Lost'.
     """
-    return {"status": "Router Blueprint Ready", "scope": ["Create Cycle", "Discrepancy Reporting", "Status Locking"]}
+    cycle = db.query(models.AuditCycle).filter(models.AuditCycle.id == cycle_id).first()
+    if not cycle:
+        raise HTTPException(status_code=404, detail="Target audit context not found.")
+
+    if cycle.status == "Closed":
+        return {"message": "Audit cycle was already locked and closed out."}
+
+    # Pull checklist line item entries to evaluate systemic inventory mutations
+    items = db.query(models.AuditItem).filter(models.AuditItem.audit_cycle_id == cycle.id).all()
+    
+    mutated_lost_count = 0
+    for item in items:
+        if item.verification_state == "Missing":
+            # State Machine Hook: Shift lifecycle to Lost
+            item.asset.lifecycle_status = "Lost"
+            mutated_lost_count += 1
+            
+            # --- AUTOMATED SYSTEM LOG ---
+            log_entry = models.SystemLog(
+                message=f"audit discrepancy flagged : {item.asset.asset_tag} missing",
+                category="Alert"
+            )
+            db.add(log_entry)
+
+    cycle.status = "Closed"
+    db.commit()
+
+    return {
+        "status": "Closed",
+        "message": f"Audit cycle closed successfully. {mutated_lost_count} missing items automatically updated to 'Lost' in inventory systems."
+    }
+
+# =============================================================================
+# SCREEN 9: REPORTS, ANALYTICS & INTELLIGENCE ENGINE (NO HARDCODING)
+# =============================================================================
+
+# --- Pydantic Schemas ---
+class ChartDataPoint(BaseModel):
+    label: str
+    value: float
+
+class TextSummaryItem(BaseModel):
+    title: str
+    detail: str
+
+class AnalyticsReportResponse(BaseModel):
+    utilization_by_department: List[ChartDataPoint]
+    maintenance_frequency_trend: List[ChartDataPoint]
+    most_used_assets: List[TextSummaryItem]
+    idle_assets: List[TextSummaryItem]
+    assets_due_for_attention: List[TextSummaryItem]
+
+# --- API Endpoints ---
+@app.get("/analytics/report", response_model=AnalyticsReportResponse, tags=["Screen 9"])
+def get_analytics_report_dashboard(db: Session = Depends(get_db)):
+    """
+    Compiles real-time data-driven allocation metrics, maintenance trends,
+    and asset status alerts directly from the live operational tables.
+    """
+    
+    # 1. Chart: Utilization by Department (Count of Active Allocations/Transfers)
+    dept_util = db.query(
+        models.Department.name, 
+        func.count(models.AllocationTransfer.id)
+    ).join(models.AllocationTransfer, models.Department.id == models.AllocationTransfer.target_department_id)\
+     .filter(models.AllocationTransfer.status == "Active")\
+     .group_by(models.Department.name).all()
+    
+    utilization_chart = [ChartDataPoint(label=name, value=float(cnt)) for name, cnt in dept_util]
+
+    # 2. Chart: Maintenance Frequency Trend Line Data (Aggregated from live requests)
+    # Grouping by month name representation using MySQL's DATE_FORMAT
+    maint_query = db.query(
+        func.date_format(models.MaintenanceRequest.created_at, '%b').label('month'),
+        func.count(models.MaintenanceRequest.id).label('count')
+    ).group_by(func.date_format(models.MaintenanceRequest.created_at, '%b'), 
+               func.date_format(models.MaintenanceRequest.created_at, '%Y%m'))\
+     .order_by(func.date_format(models.MaintenanceRequest.created_at, '%Y%m')).all()
+     
+    maint_trend = [ChartDataPoint(label=m[0], value=float(m[1])) for m in maint_query]
+
+    # 3. Dynamic: Most Used Assets (Top bookable assets based on total confirmed bookings count)
+    top_booked = db.query(
+        models.Asset.name, 
+        func.count(models.ResourceBooking.id)
+    ).join(models.ResourceBooking)\
+     .filter(models.ResourceBooking.status != "Cancelled")\
+     .group_by(models.Asset.name)\
+     .order_by(func.count(models.ResourceBooking.id).desc()).limit(5).all()
+     
+    most_used = [TextSummaryItem(title=name, detail=f"{cnt} bookings recorded") for name, cnt in top_booked]
+
+    # 4. Dynamic: Idle Assets (Assets marked Available but have seen no activity for a long time)
+    # Calculating idle duration based on when the asset was registered or last verified
+    idle_query = db.query(models.Asset)\
+        .filter(models.Asset.lifecycle_status == "Available")\
+        .order_by(models.Asset.acquisition_date.asc()).limit(5).all()
+        
+    idle_assets = []
+    for asset in idle_query:
+        days_idle = (datetime.date.today() - asset.acquisition_date).days
+        idle_assets.append(TextSummaryItem(
+            title=f"{asset.name} ({asset.asset_tag})", 
+            detail=f"Available pool status - {days_idle} days since registration context"
+        ))
+
+    # 5. Dynamic: Attention/Retirement Alerts List (System discrepancies and critical/high items)
+    anomalous_items = db.query(models.AuditItem)\
+        .filter(models.AuditItem.verification_state.in_(["Missing", "Damaged"]))\
+        .order_by(models.AuditItem.updated_at.desc()).limit(3).all()
+        
+    attention_list = []
+    for item in anomalous_items:
+        attention_list.append(TextSummaryItem(
+            title=f"Discrepancy: {item.asset.name} ({item.asset.asset_tag})",
+            detail=f"Flagged as {item.verification_state} during audit verification cycle."
+        ))
+        
+    # Append high priority active maintenance requests to the attention panel
+    active_maint = db.query(models.MaintenanceRequest)\
+        .filter(models.MaintenanceRequest.status.in_(["Pending", "Approved", "In_Progress"]))\
+        .filter(models.MaintenanceRequest.priority.in_(["High", "Critical"]))\
+        .limit(3).all()
+        
+    for req in active_maint:
+        attention_list.append(TextSummaryItem(
+            title=f"Urgent Care: {req.asset.name}",
+            detail=f"Locked under {req.priority} tier issue tracking code. Column: {req.status}."
+        ))
+
+    return AnalyticsReportResponse(
+        utilization_by_department=utilization_chart,
+        maintenance_frequency_trend=maint_trend,
+        most_used_assets=most_used,
+        idle_assets=idle_assets,
+        assets_due_for_attention=attention_list
+    )
 
 
-@app.get("/analytics_", tags=["Placeholder Router"])
-def screen_9_and_10_analytics_and_logs():
+# =============================================================================
+# SCREEN 10: HISTORICAL ACTIVITY LOGS & NOTIFICATIONS ENGINE (NO HARDCODING)
+# =============================================================================
+
+# --- Pydantic Schemas ---
+class LogItemResponse(BaseModel):
+    log_id: int
+    message: str
+    category: str
+    time_ago: str
+
+# --- API Endpoints ---
+@app.get("/notifications/logs", response_model=List[LogItemResponse], tags=["Screen 10"])
+def get_activity_logs(filter_tab: str = "All", db: Session = Depends(get_db)):
     """
-    [SCREEN 9 & 10 ROUTER]: Intelligence Reporting & Auditable Activity Logging.
-    - Compiles allocation summary matrices and usage heatmaps.
-    - Maintains historic activity logs (Who did what, and when) across all operational modules.
+    Fetches contextual change event pipelines filtered by UI panel categories.
+    Exclusively serves real records generated by engine database actions across application layers.
+    Allowed filter_tab values: 'All', 'Alerts', 'Approvals', 'Bookings', 'General'
     """
-    return {"status": "Router Blueprint Ready", "scope": ["Utilization Heatmaps", "System Logs", "Alert Triggers"]}
+    query = db.query(models.SystemLog)
+    
+    # Clean category mapping rules translating UI request strings directly to Database Enums
+    if filter_tab == "Alerts":
+        query = query.filter(models.SystemLog.category == "Alert")
+    elif filter_tab == "Approvals":
+        query = query.filter(models.SystemLog.category == "Approval")
+    elif filter_tab == "Bookings":
+        query = query.filter(models.SystemLog.category == "Booking")
+    elif filter_tab == "General":
+        query = query.filter(models.SystemLog.category == "General")
+        
+    logs = query.order_by(models.SystemLog.created_at.desc()).limit(50).all()
+    
+    # Helper context execution to parse standard scannable time indicators matching wireframes
+    def compute_time_string(created_time):
+        diff = datetime.datetime.utcnow() - created_time
+        if diff.days > 0:
+            return f"{diff.days}d ago"
+        hours = diff.seconds // 3600
+        if hours > 0:
+            return f"{hours}h ago"
+        minutes = (diff.seconds % 3600) // 60
+        return f"{max(1, minutes)}m ago"
+
+    response_list = []
+    for l in logs:
+        response_list.append(LogItemResponse(
+            log_id=l.id,
+            message=l.message,
+            category=l.category,
+            time_ago=compute_time_string(l.created_at)
+        ))
+        
+    return response_list

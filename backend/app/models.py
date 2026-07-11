@@ -136,3 +136,13 @@ class AuditItem(Base):
     verification_state = Column(Enum('Pending', 'Verified', 'Missing', 'Damaged'), default='Pending')
     notes = Column(Text, nullable=True)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    asset = relationship("Asset")
+
+
+class SystemLog(Base):
+    __tablename__ = 'system_logs'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    message = Column(String(255), nullable=False)
+    category = Column(Enum('Alert', 'Approval', 'Booking', 'General'), default='General')
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
