@@ -444,6 +444,166 @@ def get_asset_history(asset_name: str, db: Session = Depends(get_db)):
     }
 
 
+# =============================================================================
+# SCREEN 5: ASSET ALLOCATION & TRANSFER ENGINE WITH AUTO-DETECTION
+# =============================================================================
+
+# --- Pydantic Schemas ---
+
+class AssetCheckResponse(BaseModel):
+    asset_tag: str
+    name: str
+    lifecycle_status: str
+    is_blocked: bool
+    current_holder_name: Optional[str] = None
+    current_holder_department: Optional[str] = None
+    alert_message: Optional[str] = None
+
+class AllocationSubmitRequest(BaseModel):
+    asset_name: str
+    target_employee_name: str
+    requested_by_name: str
+    reason_notes: Optional[str] = None
+    expected_return_date: Optional[datetime.date] = None
+
+class HistoricalTimelineItem(BaseModel):
+    date: str
+    event_text: str
+
+class AllocationSubmitResponse(BaseModel):
+    status: str
+    transaction_type: str
+    message: str
+    timeline: List[HistoricalTimelineItem]
+
+
+# --- API Endpoints ---
+
+@app.get("/allocations/check-asset", response_model=AssetCheckResponse, tags=["Screen 5"])
+def check_asset_allocation_state(asset_name: str, db: Session = Depends(get_db)):
+    """
+    Triggers when the user selects an asset on Screen 5.
+    Evaluates allocation status to warn the frontend of a double-allocation state.
+    """
+    asset = db.query(models.Asset).filter(models.Asset.name == asset_name).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset profile not found.")
+    
+    is_blocked = False
+    current_holder_name = None
+    current_holder_department = None
+    alert_message = None
+
+    # If already allocated, pull the active tracking record details to populate the red warning banner
+    if asset.lifecycle_status == "Allocated":
+        is_blocked = True
+        active_alloc = db.query(models.AllocationTransfer).filter(
+            models.AllocationTransfer.asset_id == asset.id,
+            models.AllocationTransfer.status == "Active"
+        ).first()
+        
+        if active_alloc and active_alloc.holder:
+            current_holder_name = active_alloc.holder.name
+            if active_alloc.holder.department:
+                current_holder_department = active_alloc.holder.department.name
+            
+            alert_message = f"Already Allocated to {current_holder_name} ({current_holder_department or 'No Dept'}). Direct re-allocation is blocked - submit a transfer request below."
+            
+    elif asset.lifecycle_status in ["Under Maintenance", "Lost", "Retired", "Disposed"]:
+        is_blocked = True
+        alert_message = f"Asset is currently locked under state: {asset.lifecycle_status}. Allocation operations are completely unavailable."
+
+    return AssetCheckResponse(
+        asset_tag=asset.asset_tag,
+        name=asset.name,
+        lifecycle_status=asset.lifecycle_status,
+        is_blocked=is_blocked,
+        current_holder_name=current_holder_name,
+        current_holder_department=current_holder_department,
+        alert_message=alert_message
+    )
+
+
+@app.post("/allocations/allocate", status_code=201, tags=["Screen 5"], response_model=AllocationSubmitResponse)
+def submit_allocation_or_transfer(req: AllocationSubmitRequest, db: Session = Depends(get_db)):
+    """
+    Processes the request submission.
+    Creates an Active Allocation or a Pending_Approval Transfer depending on current state.
+    """
+    # 1. Resolve domain models
+    asset = db.query(models.Asset).filter(models.Asset.name == req.asset_name).first()
+    target_user = db.query(models.User).filter(models.User.name == req.target_employee_name).first()
+    requester = db.query(models.User).filter(models.User.name == req.requested_by_name).first()
+
+    if not asset or not target_user or not requester:
+        raise HTTPException(status_code=404, detail="One or more target entities could not be resolved from values.")
+
+    # 2. Process Business Rules Based on Lifecycle State
+    if asset.lifecycle_status == "Allocated":
+        transaction_type = "Transfer"
+        execution_status = "Pending_Approval"
+        msg = f"Direct allocation blocked. Transfer request safely submitted for approval to move asset to {target_user.name}."
+        
+        # Pull current active holder context to keep historical ledger link intact
+        active_alloc = db.query(models.AllocationTransfer).filter(
+            models.AllocationTransfer.asset_id == asset.id, models.AllocationTransfer.status == "Active"
+        ).first()
+        current_holder_id = active_alloc.current_holder_id if active_alloc else None
+
+    elif asset.lifecycle_status == "Available":
+        transaction_type = "Allocation"
+        execution_status = "Active"
+        msg = f"Successfully allocated {asset.asset_tag} directly to {target_user.name}."
+        current_holder_id = target_user.id
+        
+        # Lock asset down immediately
+        asset.lifecycle_status = "Allocated"
+    else:
+        raise HTTPException(status_code=400, detail=f"Cannot allocate asset with current state: {asset.lifecycle_status}")
+
+    # 3. Commit the ledger transaction record
+    new_tx = models.AllocationTransfer(
+        asset_id=asset.id,
+        current_holder_id=current_holder_id,
+        target_department_id=target_user.department_id if transaction_type == "Transfer" else None,
+        requested_by_id=requester.id,
+        expected_return_date=req.expected_return_date,
+        type=transaction_type,
+        status=execution_status,
+        checkin_notes=req.reason_notes
+    )
+    db.add(new_tx)
+    db.commit()
+
+    # 4. Compile Consolidated UI Feed Timeline History Array (Sorted Newest First)
+    all_history = db.query(models.AllocationTransfer).filter(
+        models.AllocationTransfer.asset_id == asset.id
+    ).order_by(models.AllocationTransfer.created_at.desc()).all()
+
+    timeline_feed = []
+    for log in all_history:
+        date_str = log.created_at.strftime("%b %d")
+        holder_lbl = log.holder.name if log.holder else "Unassigned Space"
+        
+        if log.type == "Allocation" and log.status == "Active":
+            text = f"Allocated to {holder_lbl}"
+            if log.holder and log.holder.department:
+                text += f" - {log.holder.department.name}"
+        elif log.type == "Transfer" and log.status == "Pending_Approval":
+            text = f"Transfer Request Pending to target department"
+        else:
+            text = f"Returned / State change entry recorded (Notes: {log.checkin_notes or 'none'})"
+            
+        timeline_feed.append(HistoricalTimelineItem(date=date_str, event_text=text))
+
+    return AllocationSubmitResponse(
+        status="Success",
+        transaction_type=transaction_type,
+        message=msg,
+        timeline=timeline_feed
+    )
+
+
 @app.post("/allocations/allocate", tags=["Placeholder Router"])
 def screen_5_allocation_engine():
     """
