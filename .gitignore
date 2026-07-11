@@ -1,0 +1,12 @@
+/venv
+/env
+/Mine
+/__pycache__
+
+.env
+Test.ipynb
+
+
+*.txt
+*.env
+*.pyc
