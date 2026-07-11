@@ -604,7 +604,138 @@ def submit_allocation_or_transfer(req: AllocationSubmitRequest, db: Session = De
     )
 
 
-@app.post("/allocations/allocate", tags=["Placeholder Router"])
+# =============================================================================
+# SCREEN 6: RESOURCE BOOKING & TIME-SLOT RESOLVER
+# =============================================================================
+
+class BookingItemResponse(BaseModel):
+    booking_id: int
+    user_name: str
+    start_time: str
+    end_time: str
+    status: str
+    display_text: str
+
+class ResourceScheduleResponse(BaseModel):
+    asset_name: str
+    asset_tag: str
+    date: str
+    bookings: List[BookingItemResponse]
+
+class ReserveSlotRequest(BaseModel):
+    asset_name: str
+    user_name: str
+    date: datetime.date  # e.g., "2026-07-12"
+    start_hour: int      # e.g., 9 for 09:00
+    end_hour: int        # e.g., 10 for 10:00
+
+
+@app.get("/bookings/schedule", response_model=ResourceScheduleResponse, tags=["Screen 6"])
+def get_resource_schedule(asset_name: str, target_date: datetime.date, db: Session = Depends(get_db)):
+    """
+    Fetches all bookings for a shared asset on a specific date to build the UI calendar view.
+    """
+    asset = db.query(models.Asset).filter(models.Asset.name == asset_name, models.Asset.is_shared_bookable == True).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Shared bookable resource profile not found.")
+
+    start_of_day = datetime.datetime.combine(target_date, datetime.time.min)
+    end_of_day = datetime.datetime.combine(target_date, datetime.time.max)
+
+    bookings = db.query(models.ResourceBooking).filter(
+        models.ResourceBooking.asset_id == asset.id,
+        models.ResourceBooking.start_time >= start_of_day,
+        models.ResourceBooking.end_time <= end_of_day,
+        models.ResourceBooking.status != "Cancelled"
+    ).order_by(models.ResourceBooking.start_time.asc()).all()
+
+    booking_list = []
+    for bk in bookings:
+        user_name = bk.user.name if bk.user else "Unknown User"
+        s_str = bk.start_time.strftime("%H:%M")
+        e_str = bk.end_time.strftime("%H:%M")
+        
+        # Cross-platform safe integer extraction for clean human-readable hours
+        start_hour = bk.start_time.hour if bk.start_time.hour <= 12 else bk.start_time.hour - 12
+        start_hour = 12 if start_hour == 0 else start_hour
+        
+        end_hour = bk.end_time.hour if bk.end_time.hour <= 12 else bk.end_time.hour - 12
+        end_hour = 12 if end_hour == 0 else end_hour
+        end_period = bk.end_time.strftime('%p')
+        
+        booking_list.append(BookingItemResponse(
+            booking_id=bk.id,
+            user_name=user_name,
+            start_time=s_str,
+            end_time=e_str,
+            status=bk.status,
+            display_text=f"Booked - {user_name} - {start_hour} to {end_hour} {end_period}"
+        ))
+
+    return ResourceScheduleResponse(
+        asset_name=asset.name,
+        asset_tag=asset.asset_tag,
+        date=target_date.strftime("%a, %d %b"),
+        bookings=booking_list
+    )
+
+
+@app.post("/bookings/reserve", status_code=201, tags=["Screen 6"])
+def reserve_resource_timeslot(req: ReserveSlotRequest, db: Session = Depends(get_db)):
+    """
+    Validates boundary constraints to prevent overlapping time slot scheduling entries.
+    """
+    asset = db.query(models.Asset).filter(models.Asset.name == req.asset_name, models.Asset.is_shared_bookable == True).first()
+    user = db.query(models.User).filter(models.User.name == req.user_name).first()
+
+    if not asset or not user:
+        raise HTTPException(status_code=404, detail="Target shared resource or user identity could not be resolved.")
+
+    # Guard check: Ensure asset is not out under structural repair
+    if asset.lifecycle_status == "Under Maintenance":
+        raise HTTPException(status_code=400, detail="Resource is under maintenance and completely unavailable for booking.")
+
+    # Construct explicit datetime objects
+    proposed_start = datetime.datetime.combine(req.date, datetime.time(req.start_hour, 0, 0))
+    proposed_end = datetime.datetime.combine(req.date, datetime.time(req.end_hour, 0, 0))
+
+    if proposed_start >= proposed_end:
+        raise HTTPException(status_code=400, detail="Invalid duration window configuration parameters provided.")
+
+    # Core Overlap Query Constraint Engine logic: (StartA < EndB) AND (EndA > StartB)
+    overlap_conflict = db.query(models.ResourceBooking).filter(
+        models.ResourceBooking.asset_id == asset.id,
+        models.ResourceBooking.status != "Cancelled",
+        models.ResourceBooking.start_time < proposed_end,
+        models.ResourceBooking.end_time > proposed_start
+    ).first()
+
+    if overlap_conflict:
+        conflict_user = overlap_conflict.user.name if overlap_conflict.user else "Another Team"
+        raise HTTPException(
+            status_code=409,
+            detail=f"Requested {req.start_hour}:00 to {req.end_hour}:00 - conflict - slot is unavailable (Reserved by {conflict_user})."
+        )
+
+    # Success: Save booking reservation ledger entry record
+    new_booking = models.ResourceBooking(
+        asset_id=asset.id,
+        user_id=user.id,
+        start_time=proposed_start,
+        end_time=proposed_end,
+        status="Upcoming"
+    )
+    db.add(new_booking)
+    db.commit()
+    db.refresh(new_booking)
+
+    return {
+        "status": "Success",
+        "message": f"Slot successfully reserved for {asset.name} from {req.start_hour}:00 to {req.end_hour}:00.",
+        "booking_id": new_booking.id
+    }
+
+@app.post("/allocations/allocate_", tags=["Placeholder Router"])
 def screen_5_allocation_engine():
     """
     [SCREEN 5 ROUTER]: Allocation & Handoff Core.
@@ -614,7 +745,7 @@ def screen_5_allocation_engine():
     return {"status": "Router Blueprint Ready", "scope": ["Conflict Handling", "Transfer Requests", "Check-in Notes"]}
 
 
-@app.post("/bookings/reserve", tags=["Placeholder Router"])
+@app.post("/bookings/reserve_", tags=["Placeholder Router"])
 def screen_6_resource_booking():
     """
     [SCREEN 6 ROUTER]: Time-Slot Conflict Resolver.
@@ -624,7 +755,7 @@ def screen_6_resource_booking():
     return {"status": "Router Blueprint Ready", "scope": ["Calendar Feeds", "Overlap Validation", "Cancellations"]}
 
 
-@app.patch("/maintenance/{request_id}/transition", tags=["Placeholder Router"])
+@app.patch("/maintenance/{request_id}/transition_", tags=["Placeholder Router"])
 def screen_7_maintenance_kanban():
     """
     [SCREEN 7 ROUTER]: Multi-tier Maintenance Status Router.
@@ -634,7 +765,7 @@ def screen_7_maintenance_kanban():
     return {"status": "Router Blueprint Ready", "scope": ["Raise Issue", "Approval Workflows", "Technician Assignment"]}
 
 
-@app.get("/audits", tags=["Placeholder Router"])
+@app.get("/audits_", tags=["Placeholder Router"])
 def screen_8_structured_audits():
     """
     [SCREEN 8 ROUTER]: Internal Audit Verification Tracker.
@@ -645,7 +776,7 @@ def screen_8_structured_audits():
     return {"status": "Router Blueprint Ready", "scope": ["Create Cycle", "Discrepancy Reporting", "Status Locking"]}
 
 
-@app.get("/analytics", tags=["Placeholder Router"])
+@app.get("/analytics_", tags=["Placeholder Router"])
 def screen_9_and_10_analytics_and_logs():
     """
     [SCREEN 9 & 10 ROUTER]: Intelligence Reporting & Auditable Activity Logging.
