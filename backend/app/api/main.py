@@ -19,9 +19,11 @@ def get_db():
         db.close()
 
 
+# =============================================================================
 # SCREEN 2: DASHBOARD / HOME SCREEN
+# =============================================================================
 
-@app.get("/dashboard/overview")
+@app.get("/dashboard/overview", tags=["Screen 2"])
 def get_dashboard_overview(db: Session = Depends(get_db)):
 
     current_time = datetime.datetime.utcnow()
@@ -93,10 +95,10 @@ def get_dashboard_overview(db: Session = Depends(get_db)):
     }
 
 
-# SCREEN ROUTER PLACEHOLDERS
 
-
+# =============================================================================
 # Sesssion 3
+# =============================================================================
 
 # Pydantic Schemas
 class DepartmentRequest(BaseModel):
@@ -128,7 +130,7 @@ class DepartmentResponse(BaseModel):
 
 
 # --- TAB A: Department Management ---
-@app.get("/admin/departments", response_model=List[DepartmentResponse])
+@app.get("/admin/departments", response_model=List[DepartmentResponse], tags=["Screen 3"])
 def list_departments(db: Session = Depends(get_db)):
     departments = db.query(models.Department).all()
     
@@ -155,7 +157,7 @@ def list_departments(db: Session = Depends(get_db)):
         ))
     return response
 
-@app.post("/admin/departments", status_code=201, response_model=DepartmentResponse)
+@app.post("/admin/departments", status_code=201, response_model=DepartmentResponse, tags=["Screen 3"])
 def create_department(dept: DepartmentRequest, db: Session = Depends(get_db)):
     # 1. Check if department name already exists to prevent duplicate failures
     existing_dept = db.query(models.Department).filter(models.Department.name == dept.name).first()
@@ -196,7 +198,7 @@ def create_department(dept: DepartmentRequest, db: Session = Depends(get_db)):
         status=db_dept.status
     )
 
-@app.patch("/admin/departments/{dept_id}", response_model=DepartmentResponse)
+@app.patch("/admin/departments/{dept_id}", response_model=DepartmentResponse, tags=["Screen 3"])
 def update_department(dept_id: int, dept_data: DepartmentRequest, db: Session = Depends(get_db)):
     dept = db.query(models.Department).filter(models.Department.id == dept_id).first()
     if not dept:
@@ -233,7 +235,7 @@ def update_department(dept_id: int, dept_data: DepartmentRequest, db: Session = 
     )
 
 # --- TAB C: Employee Directory ---
-@app.get("/admin/employees", response_model=List[EmployeeResponse])
+@app.get("/admin/employees", response_model=List[EmployeeResponse], tags=["Screen 3"])
 def list_employees(db: Session = Depends(get_db)):
     users = db.query(models.User).all()
     
@@ -254,7 +256,7 @@ def list_employees(db: Session = Depends(get_db)):
         ))
     return response
 
-@app.patch("/admin/employees/{user_id}/manage")
+@app.patch("/admin/employees/{user_id}/manage", tags=["Screen 3"])
 def manage_employee(user_id: int, role: str, department_name: Optional[str] = None, status: str = "Active", db: Session = Depends(get_db)):
     if role not in ['Admin', 'Asset Manager', 'Department Head', 'Employee']:
         raise HTTPException(status_code=400, detail="Invalid role assignment execution template.")
@@ -275,14 +277,47 @@ def manage_employee(user_id: int, role: str, department_name: Optional[str] = No
     db.commit()
     return {"message": f"Successfully updated profile for {user.name}"}
 
-"""
 # =============================================================================
-# SCREEN 4: ASSET REGISTRATION & DIRECTORY (FULLY OPERATIONAL)
+# SCREEN 4: ASSET REGISTRATION & DIRECTORY 
 # =============================================================================
 
-@app.post("/assets", status_code=201)
+# Pydantic Incoming Request Schema
+class AssetCreate(BaseModel):
+    name: str
+    category_name: str
+    serial_number: Optional[str] = None
+    acquisition_date: datetime.date
+    acquisition_cost: float
+    condition_state: Optional[str] = "Good"
+    location: str
+    is_shared_bookable: Optional[bool] = False
+    dynamic_attributes: Optional[Dict[str, Any]] = None
+
+# Pydantic Outgoing Response Schema
+class AssetResponse(BaseModel):
+    id: int
+    asset_tag: str
+    name: str
+    category_name: str  # Outgoing category text field replacing category_id
+    serial_number: Optional[str]
+    acquisition_date: datetime.date
+    acquisition_cost: float
+    condition_state: str
+    lifecycle_status: str
+    location: str
+    is_shared_bookable: bool
+    dynamic_attributes: Optional[Dict[str, Any]]
+
+    class Config:
+        from_attributes = True
+
+
+@app.post("/assets", status_code=201, response_model=AssetResponse, tags=["Screen 4"])
 def register_asset(asset: AssetCreate, db: Session = Depends(get_db)):
-    # Sequential Asset Tag Generation Auto Engine (e.g., AF-0008)
+    category = db.query(models.Category).filter(models.Category.name == asset.category_name).first()
+    if not category:
+        raise HTTPException(status_code=404, detail=f"Category '{asset.category_name}' not found.")
+
     last_asset = db.query(models.Asset).order_by(models.Asset.id.desc()).first()
     next_id = (last_asset.id + 1) if last_asset else 1
     generated_tag = f"AF-{next_id:04d}"
@@ -290,7 +325,7 @@ def register_asset(asset: AssetCreate, db: Session = Depends(get_db)):
     db_asset = models.Asset(
         asset_tag=generated_tag,
         name=asset.name,
-        category_id=asset.category_id,
+        category_id=category.id,
         serial_number=asset.serial_number,
         acquisition_date=asset.acquisition_date,
         acquisition_cost=asset.acquisition_cost,
@@ -303,12 +338,28 @@ def register_asset(asset: AssetCreate, db: Session = Depends(get_db)):
     db.add(db_asset)
     db.commit()
     db.refresh(db_asset)
-    return db_asset
+    
+    # Manually map to Response Schema to output category name string
+    return AssetResponse(
+        id=db_asset.id,
+        asset_tag=db_asset.asset_tag,
+        name=db_asset.name,
+        category_name=category.name,
+        serial_number=db_asset.serial_number,
+        acquisition_date=db_asset.acquisition_date,
+        acquisition_cost=db_asset.acquisition_cost,
+        condition_state=db_asset.condition_state,
+        lifecycle_status=db_asset.lifecycle_status,
+        location=db_asset.location,
+        is_shared_bookable=db_asset.is_shared_bookable,
+        dynamic_attributes=db_asset.dynamic_attributes
+    )
 
-@app.get("/assets")
+
+@app.get("/assets", response_model=List[AssetResponse], tags=["Screen 4"])
 def query_asset_directory(
     search: Optional[str] = None,
-    category_id: Optional[int] = None,
+    category_name: Optional[str] = None,
     status: Optional[str] = None,
     location: Optional[str] = None,
     db: Session = Depends(get_db)
@@ -323,23 +374,51 @@ def query_asset_directory(
                 models.Asset.serial_number.like(f"%{search}%")
             )
         )
-    if category_id:
-        query = query.filter(models.Asset.category_id == category_id)
+    if category_name:
+        query = query.join(models.Category).filter(models.Category.name == category_name)
     if status:
         query = query.filter(models.Asset.lifecycle_status == status)
     if location:
         query = query.filter(models.Asset.location.like(f"%{location}%"))
         
-    return query.all()
+    assets = query.all()
+    
+    # Convert active SQLAlchemy model items into formatted response schemas
+    response = []
+    for a in assets:
+        # Resolves category via the `category` relationship setup in models.py
+        cat_name = a.category.name if a.category else "Uncategorized"
+        
+        response.append(AssetResponse(
+            id=a.id,
+            asset_tag=a.asset_tag,
+            name=a.name,
+            category_name=cat_name,
+            serial_number=a.serial_number,
+            acquisition_date=a.acquisition_date,
+            acquisition_cost=a.acquisition_cost,
+            condition_state=a.condition_state,
+            lifecycle_status=a.lifecycle_status,
+            location=a.location,
+            is_shared_bookable=a.is_shared_bookable,
+            dynamic_attributes=a.dynamic_attributes
+        ))
+        
+    return response
 
-@app.get("/assets/{asset_id}/history")
-def get_asset_history(asset_id: int, db: Session = Depends(get_db)):
-    asset = db.query(models.Asset).filter(models.Asset.id == asset_id).first()
+
+@app.get("/assets/history/{asset_name}", tags=["Screen 4"])
+def get_asset_history(asset_name: str, db: Session = Depends(get_db)):
+    # Look up the target profile using the asset's name column
+    asset = db.query(models.Asset).filter(models.Asset.name == asset_name).first()
     if not asset:
-        raise HTTPException(status_code=404, detail="Asset profile not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail=f"Asset profile matching name '{asset_name}' not found"
+        )
 
-    allocations = db.query(models.AllocationTransfer).filter(models.AllocationTransfer.asset_id == asset_id).all()
-    maintenance = db.query(models.MaintenanceRequest).filter(models.MaintenanceRequest.asset_id == asset_id).all()
+    allocations = db.query(models.AllocationTransfer).filter(models.AllocationTransfer.asset_id == asset.id).all()
+    maintenance = db.query(models.MaintenanceRequest).filter(models.MaintenanceRequest.asset_id == asset.id).all()
 
     return {
         "asset_tag": asset.asset_tag,
@@ -363,19 +442,6 @@ def get_asset_history(asset_id: int, db: Session = Depends(get_db)):
             } for m in maintenance
         ]
     }
-
-"""
-
-
-@app.get("/asset-directory", tags=["Placeholder Router"])
-def screen_4_asset_registration():
-    """
-    [SCREEN 4 ROUTER]: Asset Repository Registry.
-    - Generates unique tracking profiles (e.g., AF-0001).
-    - Stores acquisition records, condition values, and allows toggling the 'is_shared_bookable' visibility flag.
-    - Surfaces historical asset lifecycle paths (Available, Allocated, Reserved, Under Maintenance, etc.).
-    """
-    return {"status": "Router Blueprint Ready", "scope": ["Register Asset", "Search & Filter", "Lifecycle History"]}
 
 
 @app.post("/allocations/allocate", tags=["Placeholder Router"])
