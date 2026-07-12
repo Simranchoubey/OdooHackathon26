@@ -1,0 +1,33 @@
+AssetFlow Backend Setup (Windows)
+
+1. Create Virtual Environment
+python -m venv venv
+.\venv\Scripts\activate
+
+2. Install Dependencies
+pip install -r requirements.txt
+
+3. Setup MySQL Database
+mysql -u root -p
+
+CREATE DATABASE assetflow;
+exit
+
+mysql -u root -p assetflow < assetflow.sql # find in backend/app/database 
+
+4. Create Environment File
+
+File:
+backend/app/.env
+
+Content:
+DATABASE_URL=mysql+pymysql://<username>:<password>@localhost:3306/assetflow
+
+Example:
+DATABASE_URL=mysql+pymysql://assetflow:{Your_Password}@localhost:3306/assetflow  # can be differnt for windows
+
+5. Run FastAPI
+uvicorn backend.app.api.main:app --reload
+
+6. Open Swagger
+http://127.0.0.1:8000/docs
