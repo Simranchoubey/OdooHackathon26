@@ -15,16 +15,47 @@ export default function LoginPage() {
   const [isForgotModalOpen, setIsForgotModalOpen] = useState(false);
   const [isSignupModalOpen, setIsSignupModalOpen] = useState(false);
   const [resetEmail, setResetEmail] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
   const [signupForm, setSignupForm] = useState({
     name: "",
     email: "",
+    password: "",
     department: "Engineering",
   });
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    showToast("Signing in to AssetFlow Enterprise...", "info");
-    router.push("/dashboard");
+    if (!email || !password) {
+      showToast("Please enter your email and password", "error");
+      return;
+    }
+    
+    setIsLoading(true);
+    try {
+      const response = await fetch("http://localhost:3001/api/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ email, password }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Login failed");
+      }
+
+      localStorage.setItem("token", data.token);
+      localStorage.setItem("user", JSON.stringify(data.user));
+      
+      showToast("Successfully signed in", "success");
+      router.push("/dashboard");
+    } catch (error: any) {
+      showToast(error.message, "error");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleResetPassword = (e: React.FormEvent) => {
@@ -38,15 +69,44 @@ export default function LoginPage() {
     setResetEmail("");
   };
 
-  const handleSignup = (e: React.FormEvent) => {
+  const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!signupForm.name || !signupForm.email) {
+    if (!signupForm.name || !signupForm.email || !signupForm.password) {
       showToast("Please fill in all required fields", "error");
       return;
     }
-    showToast(`Account created for ${signupForm.name}! Welcome aboard.`, "success");
-    setIsSignupModalOpen(false);
-    router.push("/dashboard");
+    
+    setIsLoading(true);
+    try {
+      const response = await fetch("http://localhost:3001/api/auth/signup", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ 
+          name: signupForm.name, 
+          email: signupForm.email, 
+          password: signupForm.password 
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Signup failed");
+      }
+
+      localStorage.setItem("token", data.token);
+      localStorage.setItem("user", JSON.stringify(data.user));
+      
+      showToast(`Account created for ${signupForm.name}! Welcome aboard.`, "success");
+      setIsSignupModalOpen(false);
+      router.push("/dashboard");
+    } catch (error: any) {
+      showToast(error.message, "error");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -110,9 +170,12 @@ export default function LoginPage() {
           {/* Login Button */}
           <button
             type="submit"
-            className="w-full bg-primary hover:bg-surface-tint text-on-primary text-label-md uppercase rounded py-2.5 px-4 transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-1 text-center font-medium shadow-sm"
+            disabled={isLoading}
+            className={`w-full bg-primary hover:bg-surface-tint text-on-primary text-label-md uppercase rounded py-2.5 px-4 transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-1 text-center font-medium shadow-sm ${
+              isLoading ? "opacity-70 cursor-not-allowed" : ""
+            }`}
           >
-            Sign In
+            {isLoading ? "Signing In..." : "Sign In"}
           </button>
 
           {/* Divider & Sign Up */}
@@ -209,6 +272,19 @@ export default function LoginPage() {
             />
           </div>
           <div>
+            <label className="block text-label-md mb-1" htmlFor="signup-password">
+              Password
+            </label>
+            <input
+              id="signup-password"
+              type="password"
+              placeholder="Create a strong password"
+              value={signupForm.password}
+              onChange={(e) => setSignupForm({ ...signupForm, password: e.target.value })}
+              className="w-full bg-surface border border-border-subtle rounded px-3 py-2 text-body-md focus:border-primary outline-none"
+            />
+          </div>
+          <div>
             <label className="block text-label-md mb-1" htmlFor="signup-dept">
               Department
             </label>
@@ -235,9 +311,12 @@ export default function LoginPage() {
             </button>
             <button
               type="submit"
-              className="px-4 py-2 rounded text-label-md bg-primary text-on-primary hover:bg-primary/90"
+              disabled={isLoading}
+              className={`px-4 py-2 rounded text-label-md bg-primary text-on-primary hover:bg-primary/90 ${
+                isLoading ? "opacity-70 cursor-not-allowed" : ""
+              }`}
             >
-              Complete Registration
+              {isLoading ? "Processing..." : "Complete Registration"}
             </button>
           </div>
         </form>
